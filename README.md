@@ -1,5 +1,9 @@
 # kaggle_rsna
 
+## Requirements
+- Python 3
+- https://github.com/tensorflow/models
+
 ## How to
 
 Solution is under heavy development and baseline not working yet. Use at your own risk and expect waste of time.
