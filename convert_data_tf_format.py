@@ -28,15 +28,6 @@ flags.DEFINE_bool('resample', False, 'Do resample to uniform pixel spacing.')
 flags.DEFINE_float('pixel_spacing', 0.05, 'Pixel spacing for resampling.')
 FLAGS = flags.FLAGS
 
-# Left here for debugging purposes
-#    FLAGS.input_images_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data/stage_1_train_images'
-#    FLAGS.input_labeling_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data/stage_1_train_labels.csv'
-#    FLAGS.output_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data_preprocessed/stage_1_train_images.tfrecord'
-#    FLAGS.input_images_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data/stage_1_test_images'
-#    FLAGS.input_labeling_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data/stage_1_test_images.csv'
-#    FLAGS.output_path = '/home/rakhunzy/workspace/projects/kaggle_rsna/rsna_data_preprocessed/stage_1_test_images.tfrecord'
-#    FLAGS.threads = 6
-
 # In[]
 def static_vars(**kwargs):
     def decorate(func):
@@ -80,12 +71,8 @@ def create_tf_example(dcm_path, bboxes):
     xmaxs = [resize_factor[0] * bbox.xmax() / width for bbox in bboxes]
     ymins = [resize_factor[1] * bbox.y / height for bbox in bboxes]
     ymaxs = [resize_factor[1] * bbox.ymax() / height for bbox in bboxes]
-
-#    if bboxes:
-#        np_bboxes = np.array([ymins, xmins, ymaxs, xmaxs]).T
-#        draw_bounding_boxes_on_image_array(image, np_bboxes)
-#        pylab.figure()
-#        pylab.imshow(image)
+    for coords in [xmins, ymins, xmaxs, ymaxs]:
+        assert(all([0.0 <= c  and c <= 1.0 for c in coords]))
 
     classes_text = [b'opacity' for bbox in bboxes]
     classes = [1 for bbox in bboxes]
@@ -122,7 +109,15 @@ class Bbox:
         return self.x + self.width
 
     def ymax(self):
-        return self.x + self.height
+        return self.y + self.height
+
+    def __repr__(self):
+        return '{} [{}, {}, {}, {}] -> {}'.format(self.patientId,
+                                                  self.x,
+                                                  self.y,
+                                                  self.width,
+                                                  self.height,
+                                                  self.Target)
 
 
 class ReadConvertWorker():
@@ -141,7 +136,7 @@ class ReadConvertWorker():
             dcm_path = os.path.join(FLAGS.input_images_path, patient_id + '.dcm')
 #            for g in labeling:
 #                print('  Group: {}'.format(g))
-            bboxes = [Bbox(**g) for g in labeling]
+            bboxes = [Bbox(**g) for g in labeling if Bbox(**g).Target > 0]
 #            print(bboxes)
             tf_example = create_tf_example(dcm_path, bboxes)
             self.dest_queue.put(tf_example)
