@@ -24,6 +24,8 @@ flags.DEFINE_string('input_labeling_path', '', 'Path to labels.')
 flags.DEFINE_string('output_path', '', 'Path to output TFRecord.')
 flags.DEFINE_integer('threads', 1, 'Path to output TFRecord.')
 flags.DEFINE_integer('take_first_n_elements', 0, 'Path to output TFRecord.')
+flags.DEFINE_bool('resample', False, 'Do resample to uniform pixel spacing.')
+flags.DEFINE_float('pixel_spacing', 0.05, 'Pixel spacing for resampling.')
 FLAGS = flags.FLAGS
 
 # Left here for debugging purposes
@@ -60,7 +62,13 @@ def dicom_resample(dcm_data, new_spacing=[0.2, 0.2]):
 
 def create_tf_example(dcm_path, bboxes):
     dcm_data = pydicom.read_file(dcm_path)
-    image, new_spacing, resize_factor = dicom_resample(dcm_data)
+
+    image = dcm_data.pixel_array
+    pixel_spacing = np.array(dcm_data.PixelSpacing)
+    resize_factor =  np.array([1.0, 1.0])
+    if FLAGS.resample:
+        requested_spacing = [FLAGS.pixel_scacing, FLAGS.pixel_spacing]
+        image, pixel_spacing, resize_factor = dicom_resample(dcm_data, requested_spacing)
 
     height = image.shape[0]
     width = image.shape[1]
@@ -95,7 +103,7 @@ def create_tf_example(dcm_path, bboxes):
       'image/object/bbox/ymax': dataset_util.float_list_feature(ymaxs),
       'image/object/class/text': dataset_util.bytes_list_feature(classes_text),
       'image/object/class/label': dataset_util.int64_list_feature(classes),
-      'image/pixel_spacing': dataset_util.float_list_feature(new_spacing)
+      'image/pixel_spacing': dataset_util.float_list_feature(pixel_spacing)
     }))
     return tf_example
 
@@ -104,11 +112,11 @@ class Bbox:
     def __init__(self, patientId, x=-1.0, y=-1.0, width=-1.0, height=-1.0,
                  Target=-1):
         self.patientId = patientId
-        self.x = float(x)
-        self.y = float(y)
-        self.width = float(width)
-        self.height = float(height)
-        self.Target = int(Target)
+        self.x = float(x) if x else -1.0
+        self.y = float(y) if y else -1.0
+        self.width = float(width) if width else -1.0
+        self.height = float(height) if height else -1.0
+        self.Target = int(Target) if Target else -1
 
     def xmax(self):
         return self.x + self.width
@@ -131,7 +139,10 @@ class ReadConvertWorker():
             iimg, patient_id, labeling = item
             print('Processing image {}: {}'.format(iimg, patient_id))
             dcm_path = os.path.join(FLAGS.input_images_path, patient_id + '.dcm')
-            bboxes = [Bbox(**g) for g in labeling if int(g.get('Target', -1)) > 0]
+#            for g in labeling:
+#                print('  Group: {}'.format(g))
+            bboxes = [Bbox(**g) for g in labeling]
+#            print(bboxes)
             tf_example = create_tf_example(dcm_path, bboxes)
             self.dest_queue.put(tf_example)
             self.source_queue.task_done()
@@ -183,7 +194,7 @@ def main(_):
         datareader = sorted(datareader, key=patient_key)
         datareader = itertools.groupby(datareader, key=patient_key)
         for iimg, (key, group) in enumerate(datareader):
-            readQueue.put((iimg, key, group))
+            readQueue.put((iimg, key, list(group)))
 
     # block until all tasks are done
     readQueue.join()
