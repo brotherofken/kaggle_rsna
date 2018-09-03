@@ -10,19 +10,22 @@ import threading
 import numpy as np
 import scipy as sp
 import scipy.ndimage
+import pandas as pd
 import pydicom
 
 import tensorflow as tf
 
 from object_detection.utils import dataset_util
 from object_detection.utils.visualization_utils import encode_image_array_as_png_str, draw_bounding_boxes_on_image_array
+from sklearn.preprocessing import LabelEncoder
 
 # In[]
 flags = tf.app.flags
-flags.DEFINE_string('input_images_path', '', 'Path to input dcm images.')
-flags.DEFINE_string('input_labeling_path', '', 'Path to labels.')
-flags.DEFINE_string('output_path', '', 'Path to output TFRecord.')
-flags.DEFINE_integer('threads', 1, 'Path to output TFRecord.')
+flags.DEFINE_string('input_images_path', None, 'Path to input dcm images.')
+flags.DEFINE_string('input_labeling_path', None, 'Path to labels.')
+flags.DEFINE_string('input_detailed_info', None, 'Path to detailed info.')
+flags.DEFINE_string('output_path', None, 'Path to output TFRecord.')
+flags.DEFINE_integer('threads', 1, 'Number of parallel threads.')
 flags.DEFINE_integer('take_first_n_elements', 0, 'Path to output TFRecord.')
 flags.DEFINE_bool('resample', False, 'Do resample to uniform pixel spacing.')
 flags.DEFINE_float('pixel_spacing', 0.05, 'Pixel spacing for resampling.')
@@ -51,8 +54,10 @@ def dicom_resample(dcm_data, new_spacing=[0.2, 0.2]):
     return image, new_spacing, real_resize_factor
 
 
-def create_tf_example(dcm_path, bboxes):
+def create_tf_example(dcm_path, bboxes, patient_id=None, patients_detailed_info_dict={}):
     dcm_data = pydicom.read_file(dcm_path)
+    if not patient_id:
+        patient_id = dcm_data.PatientName
 
     image = dcm_data.pixel_array
     pixel_spacing = np.array(dcm_data.PixelSpacing)
@@ -77,6 +82,12 @@ def create_tf_example(dcm_path, bboxes):
     classes_text = [b'opacity' for bbox in bboxes]
     classes = [1 for bbox in bboxes]
 
+    if len(patients_detailed_info_dict):
+        assert(patient_id in patients_detailed_info_dict)
+
+    decease_class = patients_detailed_info_dict.get(patient_id, (-1,'UNK'))[0]
+    decease_name = patients_detailed_info_dict.get(patient_id, (-1,'UNK'))[1]
+
     tf_example = tf.train.Example(features=tf.train.Features(feature={
       'image/height': dataset_util.int64_feature(height),
       'image/width': dataset_util.int64_feature(width),
@@ -90,7 +101,13 @@ def create_tf_example(dcm_path, bboxes):
       'image/object/bbox/ymax': dataset_util.float_list_feature(ymaxs),
       'image/object/class/text': dataset_util.bytes_list_feature(classes_text),
       'image/object/class/label': dataset_util.int64_list_feature(classes),
-      'image/pixel_spacing': dataset_util.float_list_feature(pixel_spacing)
+      'image/pixel_spacing': dataset_util.float_list_feature(pixel_spacing),
+      'patient/id': dataset_util.bytes_feature(bytes(patient_id, encoding='utf-8')),
+      'patient/view_position': dataset_util.int64_feature({'AP':0, 'PA':1}.get(dcm_data.ViewPosition, -1)),
+      'patient/sex': dataset_util.int64_feature({'F':0, 'M':1}.get(dcm_data.PatientSex, -1)),
+      'patient/age': dataset_util.float_list_feature([float(dcm_data.PatientAge)]),
+      'patient/decease_class': dataset_util.int64_feature(decease_class),
+      'patient/decease_name': dataset_util.bytes_feature(bytes(decease_name, encoding='utf-8')),
     }))
     return tf_example
 
@@ -121,9 +138,10 @@ class Bbox:
 
 
 class ReadConvertWorker():
-    def __init__(self, source_queue, dest_queue):
+    def __init__(self, source_queue, dest_queue, patients_detailed_info_dict):
         self.source_queue = source_queue
         self.dest_queue = dest_queue
+        self.patients_detailed_info_dict = patients_detailed_info_dict
 
     def __call__(self):
         while True:
@@ -137,8 +155,9 @@ class ReadConvertWorker():
 #            for g in labeling:
 #                print('  Group: {}'.format(g))
             bboxes = [Bbox(**g) for g in labeling if Bbox(**g).Target > 0]
-#            print(bboxes)
-            tf_example = create_tf_example(dcm_path, bboxes)
+            tf_example = create_tf_example(dcm_path, bboxes,
+                                           patient_id=patient_id,
+                                           patients_detailed_info_dict=self.patients_detailed_info_dict)
             self.dest_queue.put(tf_example)
             self.source_queue.task_done()
 
@@ -164,6 +183,19 @@ def patient_key(d):
 # In[] Main
 def main(_):
 # In[]
+    detailed_class_info = pd.read_csv(FLAGS.input_labeling_path)
+    train_labels = pd.read_csv(FLAGS.input_detailed_info)
+    labeling = pd.merge(left = detailed_class_info, right = train_labels, how = 'left', on = 'patientId')
+    labeling = labeling.drop_duplicates()
+
+# In[]
+    lencoder = LabelEncoder()
+    lencoder.fit(labeling['class'])
+    assert(len(lencoder.classes_) == 3)
+    labeling['class_int'] = lencoder.transform(labeling['class'])
+    patients_detailed_info_dict = {r['patientId']:(r['class_int'], r['class']) for i, r in labeling[['patientId', 'class_int', 'class']].drop_duplicates().iterrows()}
+
+# In[]
     writer = tf.python_io.TFRecordWriter(FLAGS.output_path)
 
     readQueue = queue.Queue()
@@ -173,7 +205,7 @@ def main(_):
     # Start threads
     threads = []
     for i in range(FLAGS.threads):
-        t = threading.Thread(target=ReadConvertWorker(readQueue, writeQueue))
+        t = threading.Thread(target=ReadConvertWorker(readQueue, writeQueue, patients_detailed_info_dict))
         t.start()
         threads.append(t)
     t = threading.Thread(target=WriteWorker(writeQueue, writer))
